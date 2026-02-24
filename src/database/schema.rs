@@ -297,9 +297,11 @@ impl SchemaManager {
     }
 
     async fn create_lore_indexed_commits_table(&self) -> Result<()> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("git_commit_sha", DataType::Utf8, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "git_commit_sha",
+            DataType::Utf8,
+            false,
+        )]));
 
         let empty_batch = RecordBatch::new_empty(schema.clone());
         let batches = vec![Ok(empty_batch)];
@@ -1019,10 +1021,7 @@ impl SchemaManager {
         const MAX_COMPACT_FRAGMENTS: usize = 500;
 
         let should_compact = match table.stats().await {
-            Ok(stats)
-                if stats.fragment_stats.num_fragments
-                    > MAX_COMPACT_FRAGMENTS =>
-            {
+            Ok(stats) if stats.fragment_stats.num_fragments > MAX_COMPACT_FRAGMENTS => {
                 tracing::warn!(
                     "Skipping compaction for table {} \
                      ({} fragments exceeds {} limit -- \
@@ -1035,11 +1034,7 @@ impl SchemaManager {
             }
             Ok(_) => true,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to read stats for table {}: {}",
-                    table_name,
-                    e
-                );
+                tracing::warn!("Failed to read stats for table {}: {}", table_name, e);
                 true
             }
         };
@@ -1052,11 +1047,7 @@ impl SchemaManager {
                 })
                 .await
             {
-                tracing::warn!(
-                    "Failed to compact table {}: {}",
-                    table_name,
-                    e
-                );
+                tracing::warn!("Failed to compact table {}: {}", table_name, e);
                 success = false;
             }
         }

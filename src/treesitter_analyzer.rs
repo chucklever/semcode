@@ -52,6 +52,7 @@ struct LanguageQueries {
     typedef_query: Option<Query>, // Not needed for Rust
     macro_query: Query,
     call_query: Query,
+    funcptr_query: Option<Query>, // Function pointer assignments (C only)
 }
 
 pub struct TreeSitterAnalyzer {
@@ -224,6 +225,25 @@ impl TreeSitterAnalyzer {
         "#,
         )?;
 
+        // Query for function pointer assignments in designated initializers and field assignments
+        let funcptr_query = Query::new(
+            language,
+            r#"
+            ; Designated initializer: .handler = tcp_v4_rcv
+            (initializer_pair
+              designator: (field_designator (field_identifier) @field_name)
+              value: (identifier) @assigned_function
+            )
+
+            ; Field assignment: ops->handler = tcp_v4_rcv
+            (assignment_expression
+              left: (field_expression
+                field: (field_identifier) @field_name)
+              right: (identifier) @assigned_function
+            )
+        "#,
+        )?;
+
         Ok(LanguageQueries {
             function_query,
             comment_query,
@@ -231,6 +251,7 @@ impl TreeSitterAnalyzer {
             typedef_query: Some(typedef_query),
             macro_query,
             call_query,
+            funcptr_query: Some(funcptr_query),
         })
     }
 
@@ -306,6 +327,7 @@ impl TreeSitterAnalyzer {
             typedef_query: None, // Rust doesn't have typedefs like C
             macro_query,
             call_query,
+            funcptr_query: None,
         })
     }
 
@@ -375,6 +397,7 @@ impl TreeSitterAnalyzer {
             typedef_query: None, // Python doesn't have typedefs
             macro_query,
             call_query,
+            funcptr_query: None,
         })
     }
 
@@ -567,6 +590,9 @@ impl TreeSitterAnalyzer {
         // Single pass: extract all calls once and map them to functions by byte ranges
         let all_calls = self.extract_all_calls_optimized(tree, source_code, language)?;
 
+        // Extract function pointer references (designated initializers, field assignments)
+        let all_funcptr_refs = self.extract_all_funcptr_refs(tree, source_code, language)?;
+
         // Create extraction context
         let ctx = ExtractionContext {
             tree,
@@ -578,7 +604,7 @@ impl TreeSitterAnalyzer {
         };
 
         // Extract functions with embedded call data
-        let functions = self.extract_functions_with_calls(&ctx, &all_calls)?;
+        let functions = self.extract_functions_with_calls(&ctx, &all_calls, &all_funcptr_refs)?;
 
         // Extract types (single traversal as before)
         let types = self.extract_types(
@@ -641,11 +667,56 @@ impl TreeSitterAnalyzer {
         Ok(calls)
     }
 
+    /// Extract function pointer references from designated initializers and field assignments
+    fn extract_all_funcptr_refs(
+        &self,
+        tree: &Tree,
+        source_code: &str,
+        language: Language,
+    ) -> Result<Vec<(String, usize, usize)>> {
+        let queries = self.get_queries(language);
+        let funcptr_query = match &queries.funcptr_query {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut refs = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let mut captures = cursor.captures(funcptr_query, tree.root_node(), source_code.as_bytes());
+
+        while let Some((m, _)) = captures.next() {
+            for capture in m.captures {
+                let capture_name = &funcptr_query.capture_names()[capture.index as usize];
+                if *capture_name == "assigned_function" {
+                    let node = capture.node;
+                    let name = node
+                        .utf8_text(source_code.as_bytes())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Filter out obvious non-functions
+                    if name.is_empty()
+                        || name.chars().all(|c| c.is_ascii_digit())
+                        || name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                        || matches!(name.as_str(), "NULL" | "null" | "true" | "false")
+                    {
+                        continue;
+                    }
+
+                    refs.push((name, node.start_byte(), node.end_byte()));
+                }
+            }
+        }
+
+        Ok(refs)
+    }
+
     /// Extract functions with pre-computed call data (avoids per-function tree traversals)
     fn extract_functions_with_calls(
         &self,
         ctx: &ExtractionContext,
         all_calls: &[(String, usize, usize)],
+        all_funcptr_refs: &[(String, usize, usize)],
     ) -> Result<Vec<FunctionInfo>> {
         let queries = self.get_queries(ctx.language);
         let mut cursor = QueryCursor::new();
@@ -779,9 +850,10 @@ impl TreeSitterAnalyzer {
 
                 // Only extract calls and types for functions with bodies (not just declarations)
                 let (unique_calls, function_types) = if has_body {
-                    // Extract calls within this function from pre-computed list (O(m) instead of O(n))
+                    // Extract calls within this function from pre-computed lists (O(m) instead of O(n))
                     let function_calls: Vec<String> = all_calls
                         .iter()
+                        .chain(all_funcptr_refs.iter())
                         .filter(|(_, call_start, call_end)| {
                             *call_start >= function_start_byte && *call_end <= function_end_byte
                         })
@@ -867,6 +939,7 @@ impl TreeSitterAnalyzer {
     ) -> Result<Vec<FunctionInfo>> {
         // Use the optimized approach but without pre-computed calls (for compatibility)
         let all_calls = self.extract_all_calls_optimized(tree, source, language)?;
+        let all_funcptr_refs = self.extract_all_funcptr_refs(tree, source, language)?;
         let ctx = ExtractionContext {
             tree,
             source,
@@ -875,7 +948,7 @@ impl TreeSitterAnalyzer {
             source_root,
             language,
         };
-        self.extract_functions_with_calls(&ctx, &all_calls)
+        self.extract_functions_with_calls(&ctx, &all_calls, &all_funcptr_refs)
     }
 
     fn extract_comments(

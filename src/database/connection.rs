@@ -3791,8 +3791,7 @@ impl DatabaseManager {
         // have persisted some rows before the error.  Because the
         // upsert key is message_id, re-inserting those rows is
         // idempotent.
-        if let Err(e) =
-            Self::merge_insert_lore_chunk(&table, emails, &dedup_indices, &schema).await
+        if let Err(e) = Self::merge_insert_lore_chunk(&table, emails, &dedup_indices, &schema).await
         {
             tracing::warn!(
                 "insert_lore_emails: full batch of {} failed ({}), \
@@ -3810,8 +3809,7 @@ impl DatabaseManager {
             const MAX_CHUNK: usize = 128;
 
             for chunk in dedup_indices.chunks(MAX_CHUNK) {
-                if let Err(e) =
-                    Self::merge_insert_lore_chunk(&table, emails, chunk, &schema).await
+                if let Err(e) = Self::merge_insert_lore_chunk(&table, emails, chunk, &schema).await
                 {
                     tracing::warn!(
                         "insert_lore_emails: chunk of {} failed ({}), \
@@ -3821,10 +3819,7 @@ impl DatabaseManager {
                     );
                     for &idx in chunk {
                         if let Err(e2) =
-                            Self::merge_insert_lore_chunk(
-                                &table, emails, &[idx], &schema,
-                            )
-                            .await
+                            Self::merge_insert_lore_chunk(&table, emails, &[idx], &schema).await
                         {
                             tracing::warn!(
                                 "insert_lore_emails: skipping \
@@ -3901,10 +3896,7 @@ impl DatabaseManager {
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         let batches = vec![Ok(batch)];
         let batch_iterator =
-            arrow::record_batch::RecordBatchIterator::new(
-                batches.into_iter(),
-                schema.clone(),
-            );
+            arrow::record_batch::RecordBatchIterator::new(batches.into_iter(), schema.clone());
 
         let mut merge_insert = table.merge_insert(&["message_id"]);
         merge_insert
@@ -5430,7 +5422,12 @@ impl DatabaseManager {
     /// lore_indexed_commits table. The table contains only short
     /// SHA strings, so reading it entirely into memory is cheap.
     pub async fn get_indexed_lore_commits(&self) -> Result<HashSet<String>> {
-        let table = match self.connection.open_table("lore_indexed_commits").execute().await {
+        let table = match self
+            .connection
+            .open_table("lore_indexed_commits")
+            .execute()
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("Failed to open lore_indexed_commits table: {}", e);
@@ -5441,7 +5438,7 @@ impl DatabaseManager {
         let stream = table
             .query()
             .select(lancedb::query::Select::Columns(vec![
-                "git_commit_sha".to_string(),
+                "git_commit_sha".to_string()
             ]))
             .execute()
             .await?;
@@ -5473,20 +5470,24 @@ impl DatabaseManager {
             return Ok(());
         }
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("git_commit_sha", DataType::Utf8, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "git_commit_sha",
+            DataType::Utf8,
+            false,
+        )]));
 
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(commit_shas.to_vec())),
-        ];
+        let columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(commit_shas.to_vec()))];
 
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         let batches = vec![Ok(batch)];
         let batch_iterator =
             arrow::record_batch::RecordBatchIterator::new(batches.into_iter(), schema);
 
-        let table = self.connection.open_table("lore_indexed_commits").execute().await?;
+        let table = self
+            .connection
+            .open_table("lore_indexed_commits")
+            .execute()
+            .await?;
         table.add(Box::new(batch_iterator)).execute().await?;
 
         Ok(())
