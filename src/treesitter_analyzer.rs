@@ -726,6 +726,7 @@ impl TreeSitterAnalyzer {
             ctx.source.as_bytes(),
         );
         let mut functions = Vec::new();
+        let mut body_ranges: Vec<(usize, usize)> = Vec::new();
 
         // Extract all comments once (used by extract_function_with_comments)
         let comments = self.extract_comments(ctx.tree, ctx.source, ctx.language)?;
@@ -839,6 +840,10 @@ impl TreeSitterAnalyzer {
                     || matched_patterns.contains("function_ptr")
                     || matched_patterns.contains("function_ptr2");
 
+                if has_body {
+                    body_ranges.push((function_start_byte, function_end_byte));
+                }
+
                 // Extract complete function text including top comments
                 let complete_body = self.extract_function_with_comments(
                     ctx.source,
@@ -907,6 +912,36 @@ impl TreeSitterAnalyzer {
 
                 functions.push(func);
             }
+        }
+
+        // Collect funcptr refs whose byte ranges fall outside all function bodies;
+        // these originate from file-scope designated initializers.
+        let mut file_scope_calls: Vec<String> = all_funcptr_refs
+            .iter()
+            .filter(|(_, start, end)| {
+                !body_ranges
+                    .iter()
+                    .any(|(fs, fe)| *start >= *fs && *end <= *fe)
+            })
+            .map(|(name, _, _)| name.clone())
+            .collect();
+        file_scope_calls.sort();
+        file_scope_calls.dedup();
+
+        if !file_scope_calls.is_empty() {
+            let rel_path = self.make_relative_path(ctx.file_path, ctx.source_root);
+            functions.push(FunctionInfo {
+                name: format!("[file-scope:{}]", rel_path),
+                file_path: rel_path,
+                git_file_hash: ctx.git_hash.to_string(),
+                line_start: 0,
+                line_end: 0,
+                return_type: String::new(),
+                parameters: Vec::new(),
+                body: String::new(),
+                calls: Some(file_scope_calls),
+                types: None,
+            });
         }
 
         Ok(functions)
