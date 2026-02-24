@@ -2580,3 +2580,180 @@ impl TreeSitterAnalyzer {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // Runs analyze_source_with_metadata against a dummy path and
+    // fixed git hash; returns only the functions slice.
+    fn analyze_c_source(code: &str) -> Vec<FunctionInfo> {
+        let mut analyzer = TreeSitterAnalyzer::new().expect("failed to create analyzer");
+        let (functions, _types, _macros) = analyzer
+            .analyze_source_with_metadata(code, Path::new("test.c"), "deadbeef", None)
+            .expect("analysis failed");
+        functions
+    }
+
+    fn calls_for(functions: &[FunctionInfo], name: &str) -> Vec<String> {
+        functions
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.calls.clone())
+            .unwrap_or_default()
+    }
+
+    fn file_scope_entry(functions: &[FunctionInfo]) -> Option<&FunctionInfo> {
+        functions
+            .iter()
+            .find(|f| f.name.starts_with("[file-scope:"))
+    }
+
+    // ── Tests for funcptr detection within function bodies ──
+
+    #[test]
+    fn test_funcptr_designated_initializer_in_function() {
+        let code = r#"
+void setup(void) {
+    struct ops o = {
+        .handler = my_func,
+        .cleanup = cleanup_func,
+    };
+}
+"#;
+        let funcs = analyze_c_source(code);
+        let calls = calls_for(&funcs, "setup");
+        assert!(calls.contains(&"my_func".to_string()), "calls: {:?}", calls);
+        assert!(
+            calls.contains(&"cleanup_func".to_string()),
+            "calls: {:?}",
+            calls
+        );
+    }
+
+    #[test]
+    fn test_funcptr_field_assignment_in_function() {
+        let code = r#"
+void init(struct ops *o) {
+    o->handler = my_func;
+}
+"#;
+        let funcs = analyze_c_source(code);
+        let calls = calls_for(&funcs, "init");
+        assert!(calls.contains(&"my_func".to_string()), "calls: {:?}", calls);
+    }
+
+    #[test]
+    fn test_funcptr_filters_constants() {
+        let code = r#"
+void setup(void) {
+    struct ops o = {
+        .handler = real_func,
+        .cleanup = NULL,
+        .fallback = SOME_CONST,
+    };
+    o->cb = 0;
+}
+"#;
+        let funcs = analyze_c_source(code);
+        let calls = calls_for(&funcs, "setup");
+        assert!(
+            calls.contains(&"real_func".to_string()),
+            "calls: {:?}",
+            calls
+        );
+        assert!(!calls.contains(&"NULL".to_string()), "calls: {:?}", calls);
+        assert!(
+            !calls.contains(&"SOME_CONST".to_string()),
+            "calls: {:?}",
+            calls
+        );
+        assert!(!calls.contains(&"0".to_string()), "calls: {:?}", calls);
+    }
+
+    // ── Tests for file-scope collection ──
+
+    #[test]
+    fn test_file_scope_designated_initializer() {
+        let code = r#"
+static struct file_operations fops = {
+    .open = my_open,
+    .read = my_read,
+    .release = my_release,
+};
+"#;
+        let funcs = analyze_c_source(code);
+        let fs = file_scope_entry(&funcs).expect("expected a file-scope entry");
+        let calls = fs
+            .calls
+            .as_ref()
+            .expect("expected calls in file-scope entry");
+        assert!(calls.contains(&"my_open".to_string()), "calls: {:?}", calls);
+        assert!(calls.contains(&"my_read".to_string()), "calls: {:?}", calls);
+        assert!(
+            calls.contains(&"my_release".to_string()),
+            "calls: {:?}",
+            calls
+        );
+    }
+
+    #[test]
+    fn test_no_file_scope_when_all_inside_functions() {
+        let code = r#"
+void setup(void) {
+    struct ops o = {
+        .handler = my_func,
+    };
+}
+"#;
+        let funcs = analyze_c_source(code);
+        assert!(
+            file_scope_entry(&funcs).is_none(),
+            "should not emit file-scope entry when all refs are inside functions"
+        );
+    }
+
+    #[test]
+    fn test_file_scope_mixed() {
+        let code = r#"
+static struct file_operations fops = {
+    .open = fs_open,
+};
+
+void setup(void) {
+    struct ops o = {
+        .handler = body_func,
+    };
+}
+"#;
+        let funcs = analyze_c_source(code);
+
+        // The function body should carry its own ref
+        let setup_calls = calls_for(&funcs, "setup");
+        assert!(
+            setup_calls.contains(&"body_func".to_string()),
+            "setup calls: {:?}",
+            setup_calls
+        );
+        assert!(
+            !setup_calls.contains(&"fs_open".to_string()),
+            "setup should not contain file-scope ref: {:?}",
+            setup_calls
+        );
+
+        // File-scope entry should carry only the file-scope ref
+        let fs = file_scope_entry(&funcs).expect("expected a file-scope entry");
+        let fs_calls = fs.calls.as_ref().expect("expected calls");
+        assert!(
+            fs_calls.contains(&"fs_open".to_string()),
+            "file-scope calls: {:?}",
+            fs_calls
+        );
+        assert!(
+            !fs_calls.contains(&"body_func".to_string()),
+            "file-scope should not contain function-body ref: {:?}",
+            fs_calls
+        );
+    }
+}
